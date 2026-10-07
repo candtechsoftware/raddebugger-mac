@@ -1,0 +1,407 @@
+// Copyright (c) Epic Games Tools
+// Licensed under the MIT license (https://opensource.org/license/mit/)
+
+////////////////////////////////
+//~ Pipeline Tables
+
+@table(name, name_lower, color_format, depth_format)
+R_Metal_ShaderTable:
+{
+  {Rect            rect            MTLPixelFormatRGBA16Float      MTLPixelFormatInvalid}
+  {Blur            blur            MTLPixelFormatRGBA16Float      MTLPixelFormatInvalid}
+  {Mesh            mesh            MTLPixelFormatRGBA8Unorm       MTLPixelFormatDepth32Float}
+  {Geo3DComposite  geo3dcomposite  MTLPixelFormatRGBA16Float      MTLPixelFormatInvalid}
+  {Finalize        finalize        MTLPixelFormatBGRA8Unorm_sRGB  MTLPixelFormatInvalid}
+}
+
+////////////////////////////////
+//~ Shader Library
+
+@embed_string r_metal_shader_src:
+"""
+#include <metal_stdlib>
+using namespace metal;
+
+//- shared
+
+static float
+r_metal_rect_sdf(float2 sample_pos, float2 rect_half_size, float r)
+{
+  return length(max(abs(sample_pos) - rect_half_size + r, 0.0)) - r;
+}
+
+static float
+r_metal_linear_from_srgb_f32(float x)
+{
+  return x < 0.0404482362771082 ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4);
+}
+
+static float4
+r_metal_linear_from_srgba(float4 v)
+{
+  float4 result = float4(r_metal_linear_from_srgb_f32(v.x),
+                         r_metal_linear_from_srgb_f32(v.y),
+                         r_metal_linear_from_srgb_f32(v.z),
+                         v.w);
+  return result;
+}
+
+// the four corners of a strip that covers the whole target
+struct R_Metal_Fullscreen_Vertex2Pixel
+{
+  float4 position [[position]];
+  float2 texcoord;
+};
+
+static R_Metal_Fullscreen_Vertex2Pixel
+r_metal_fullscreen_vertex2pixel(uint vertex_id)
+{
+  float2 vertex_positions_modl[4] =
+  {
+    float2(0, 0),
+    float2(0, 1),
+    float2(1, 0),
+    float2(1, 1),
+  };
+  float2 vertex_position_modl = vertex_positions_modl[vertex_id];
+  R_Metal_Fullscreen_Vertex2Pixel v2p;
+  v2p.position = float4(2*vertex_position_modl.x - 1, 2*vertex_position_modl.y - 1, 0, 1);
+  v2p.texcoord = float2(vertex_position_modl.x, 1 - vertex_position_modl.y);
+  return v2p;
+}
+
+//- ui rectangles
+
+struct R_Metal_Rect2DInst
+{
+  float4 dst_rect;
+  float4 src_rect;
+  float4 colors[4];
+  float4 corner_radii;
+  float4 style;
+};
+
+struct R_Metal_Uniforms_Rect
+{
+  float4 xform[3];
+  float2 viewport_size;
+  float2 xform_scale;
+  float opacity;
+  float _padding0_;
+  float2 texture_t2d_size;
+  float4x4 texture_sample_channel_map;
+};
+
+struct R_Metal_Rect_Vertex2Pixel
+{
+  float4 position [[position]];
+  float2 texcoord_pct;
+  float2 sdf_sample_pos;
+  float4 tint;
+  float corner_radius_px;
+  float2 rect_half_size_px [[flat]];
+  float border_thickness_px [[flat]];
+  float softness_px [[flat]];
+  float omit_texture [[flat]];
+};
+
+vertex R_Metal_Rect_Vertex2Pixel
+r_metal_rect_vertex(uint vertex_id [[vertex_id]],
+                    uint instance_id [[instance_id]],
+                    const device R_Metal_Rect2DInst *insts [[buffer(0)]],
+                    constant R_Metal_Uniforms_Rect &u [[buffer(1)]])
+{
+  const device R_Metal_Rect2DInst &inst = insts[instance_id];
+
+  float2 dst_p0_px = inst.dst_rect.xy;
+  float2 dst_p1_px = inst.dst_rect.zw;
+  float2 src_p0_px = inst.src_rect.xy;
+  float2 src_p1_px = inst.src_rect.zw;
+  float2 dst_size_px = abs(dst_p1_px - dst_p0_px);
+
+  float border_thickness_px = inst.style.x;
+  float softness_px         = inst.style.y;
+  float omit_texture        = inst.style.z;
+  float shear_px            = inst.style.w;
+
+  float2 dst_p_verts_px[4] =
+  {
+    float2(dst_p0_px.x, dst_p1_px.y),
+    float2(dst_p0_px.x, dst_p0_px.y),
+    float2(dst_p1_px.x, dst_p1_px.y + shear_px),
+    float2(dst_p1_px.x, dst_p0_px.y + shear_px),
+  };
+  float2 src_p_verts_px[4] =
+  {
+    float2(src_p0_px.x, src_p1_px.y),
+    float2(src_p0_px.x, src_p0_px.y),
+    float2(src_p1_px.x, src_p1_px.y),
+    float2(src_p1_px.x, src_p0_px.y),
+  };
+  float dst_r_verts_px[4] =
+  {
+    inst.corner_radii.y,
+    inst.corner_radii.x,
+    inst.corner_radii.w,
+    inst.corner_radii.z,
+  };
+  float4 src_color[4] =
+  {
+    inst.colors[1],
+    inst.colors[0],
+    inst.colors[3],
+    inst.colors[2],
+  };
+  float2 dst_verts_pct = float2(((vertex_id >> 1) != 0) ? 1.f : 0.f,
+                                ((vertex_id & 1) != 0)  ? 0.f : 1.f);
+
+  float3x3 xform = float3x3(u.xform[0].xyz, u.xform[1].xyz, u.xform[2].xyz);
+  float2 xformed_pos = (xform * float3(dst_p_verts_px[vertex_id], 1.f)).xy;
+  xformed_pos.y = u.viewport_size.y - xformed_pos.y;
+
+  R_Metal_Rect_Vertex2Pixel v2p;
+  v2p.position            = float4(2.f * xformed_pos / u.viewport_size - 1.f, 0.f, 1.f);
+  v2p.rect_half_size_px   = dst_size_px / 2.f * u.xform_scale;
+  v2p.texcoord_pct        = src_p_verts_px[vertex_id] / u.texture_t2d_size;
+  v2p.sdf_sample_pos      = (2.f * dst_verts_pct - 1.f) * v2p.rect_half_size_px;
+  v2p.tint                = src_color[vertex_id];
+  v2p.corner_radius_px    = dst_r_verts_px[vertex_id];
+  v2p.border_thickness_px = border_thickness_px;
+  v2p.softness_px         = softness_px;
+  v2p.omit_texture        = omit_texture;
+  return v2p;
+}
+
+fragment float4
+r_metal_rect_fragment(R_Metal_Rect_Vertex2Pixel v2p [[stage_in]],
+                      constant R_Metal_Uniforms_Rect &u [[buffer(0)]],
+                      texture2d<float> main_t2d [[texture(0)]],
+                      sampler main_sampler [[sampler(0)]])
+{
+  float4 albedo_sample = float4(1, 1, 1, 1);
+  if(v2p.omit_texture < 1)
+  {
+    albedo_sample = u.texture_sample_channel_map * main_t2d.sample(main_sampler, v2p.texcoord_pct);
+    albedo_sample = r_metal_linear_from_srgba(albedo_sample);
+  }
+
+  float border_sdf_t = 1;
+  if(v2p.border_thickness_px > 0)
+  {
+    float border_sdf_s = r_metal_rect_sdf(v2p.sdf_sample_pos,
+                                          v2p.rect_half_size_px - float2(v2p.softness_px*2.f, v2p.softness_px*2.f) - v2p.border_thickness_px,
+                                          max(v2p.corner_radius_px - v2p.border_thickness_px, 0.f));
+    border_sdf_t = smoothstep(0.f, 2*v2p.softness_px, border_sdf_s);
+  }
+  if(border_sdf_t < 0.001f)
+  {
+    discard_fragment();
+  }
+
+  float corner_sdf_t = 1;
+  if(v2p.corner_radius_px > 0 || v2p.softness_px > 0.75f)
+  {
+    float corner_sdf_s = r_metal_rect_sdf(v2p.sdf_sample_pos,
+                                          v2p.rect_half_size_px - float2(v2p.softness_px*2.f, v2p.softness_px*2.f),
+                                          v2p.corner_radius_px);
+    corner_sdf_t = 1-smoothstep(0.f, 2*v2p.softness_px, corner_sdf_s);
+  }
+
+  float4 final_color = albedo_sample;
+  final_color *= v2p.tint;
+  final_color.a *= u.opacity;
+  final_color.a *= corner_sdf_t;
+  final_color.a *= border_sdf_t;
+  return final_color;
+}
+
+//- blur
+
+struct R_Metal_Uniforms_Blur
+{
+  float4 rect;
+  float4 corner_radii;
+  float2 direction;
+  float2 viewport_size;
+  uint blur_count;
+  uint _padding0_[3];
+  float4 blur_kernel[32];
+};
+
+struct R_Metal_Blur_Vertex2Pixel
+{
+  float4 position [[position]];
+  float2 texcoord;
+  float2 sdf_sample_pos;
+  float corner_radius;
+  float2 rect_half_size [[flat]];
+};
+
+vertex R_Metal_Blur_Vertex2Pixel
+r_metal_blur_vertex(uint vertex_id [[vertex_id]],
+                    constant R_Metal_Uniforms_Blur &u [[buffer(1)]])
+{
+  float2 vertex_positions_scrn[4] =
+  {
+    u.rect.xw,
+    u.rect.xy,
+    u.rect.zw,
+    u.rect.zy,
+  };
+  float corner_radii_px[4] =
+  {
+    u.corner_radii.y,
+    u.corner_radii.x,
+    u.corner_radii.w,
+    u.corner_radii.z,
+  };
+  float2 cornercoords_pct = float2(((vertex_id >> 1) != 0) ? 1.f : 0.f,
+                                   ((vertex_id & 1) != 0)  ? 0.f : 1.f);
+
+  float2 vertex_position_pct = vertex_positions_scrn[vertex_id] / u.viewport_size;
+  float2 vertex_position_scr = 2.f * vertex_position_pct - 1.f;
+  float2 rect_half_size = float2((u.rect.z-u.rect.x)/2, (u.rect.w-u.rect.y)/2);
+
+  R_Metal_Blur_Vertex2Pixel v2p;
+  v2p.position       = float4(vertex_position_scr.x, -vertex_position_scr.y, 0.f, 1.f);
+  v2p.texcoord       = vertex_position_pct;
+  v2p.sdf_sample_pos = (2.f * cornercoords_pct - 1.f) * rect_half_size;
+  v2p.rect_half_size = rect_half_size - 2.f;
+  v2p.corner_radius  = corner_radii_px[vertex_id];
+  return v2p;
+}
+
+fragment float4
+r_metal_blur_fragment(R_Metal_Blur_Vertex2Pixel v2p [[stage_in]],
+                      constant R_Metal_Uniforms_Blur &u [[buffer(0)]],
+                      texture2d<float> stage_t2d [[texture(0)]],
+                      sampler stage_sampler [[sampler(0)]])
+{
+  float3 color = u.blur_kernel[0].x * stage_t2d.sample(stage_sampler, v2p.texcoord).rgb;
+  for(uint i = 1; i < u.blur_count; i += 1)
+  {
+    float weight = u.blur_kernel[i].x;
+    float offset = u.blur_kernel[i].y;
+    color += weight * stage_t2d.sample(stage_sampler, v2p.texcoord - offset * u.direction).rgb;
+    color += weight * stage_t2d.sample(stage_sampler, v2p.texcoord + offset * u.direction).rgb;
+  }
+
+  float corner_sdf_s = r_metal_rect_sdf(v2p.sdf_sample_pos, v2p.rect_half_size, v2p.corner_radius);
+  float corner_sdf_t = 1-smoothstep(0.f, 2.f, corner_sdf_s);
+  if(corner_sdf_t < 0.9f)
+  {
+    discard_fragment();
+  }
+
+  return float4(color, 1.f);
+}
+
+//- meshes
+
+struct R_Metal_MeshVertex
+{
+  packed_float3 position;
+  packed_float3 normal;
+  packed_float2 texcoord;
+  packed_float3 color;
+};
+
+struct R_Metal_Uniforms_Mesh
+{
+  float4x4 xform;
+};
+
+struct R_Metal_Mesh_Vertex2Pixel
+{
+  float4 position [[position]];
+  float2 texcoord;
+  float4 color;
+};
+
+vertex R_Metal_Mesh_Vertex2Pixel
+r_metal_mesh_vertex(uint vertex_id [[vertex_id]],
+                    const device R_Metal_MeshVertex *vertices [[buffer(0)]],
+                    constant R_Metal_Uniforms_Mesh &u [[buffer(1)]])
+{
+  const device R_Metal_MeshVertex &v = vertices[vertex_id];
+  R_Metal_Mesh_Vertex2Pixel v2p;
+  v2p.position = u.xform * float4(float3(v.position), 1.f);
+  v2p.texcoord = float2(v.texcoord);
+  v2p.color    = float4(float3(v.color), 1.f);
+  return v2p;
+}
+
+fragment float4
+r_metal_mesh_fragment(R_Metal_Mesh_Vertex2Pixel v2p [[stage_in]])
+{
+  return v2p.color;
+}
+
+//- geo3d composition
+
+vertex R_Metal_Fullscreen_Vertex2Pixel
+r_metal_geo3dcomposite_vertex(uint vertex_id [[vertex_id]])
+{
+  return r_metal_fullscreen_vertex2pixel(vertex_id);
+}
+
+fragment float4
+r_metal_geo3dcomposite_fragment(R_Metal_Fullscreen_Vertex2Pixel v2p [[stage_in]],
+                                texture2d<float> stage_t2d [[texture(0)]],
+                                sampler stage_sampler [[sampler(0)]])
+{
+  float4 final_color = stage_t2d.sample(stage_sampler, v2p.texcoord);
+  return final_color;
+}
+
+//- finalize
+
+vertex R_Metal_Fullscreen_Vertex2Pixel
+r_metal_finalize_vertex(uint vertex_id [[vertex_id]])
+{
+  return r_metal_fullscreen_vertex2pixel(vertex_id);
+}
+
+fragment float4
+r_metal_finalize_fragment(R_Metal_Fullscreen_Vertex2Pixel v2p [[stage_in]],
+                          texture2d<float> stage_t2d [[texture(0)]],
+                          sampler stage_sampler [[sampler(0)]])
+{
+  float4 final_color = stage_t2d.sample(stage_sampler, v2p.texcoord);
+  final_color.a = 1;
+  return final_color;
+}
+"""
+
+////////////////////////////////
+//~ Table Generators
+
+@enum R_Metal_ShaderKind:
+{
+  @expand(R_Metal_ShaderTable a) `$(a.name)`,
+  COUNT,
+}
+
+@c_file @data(String8)
+r_metal_shader_kind_vfunc_name_table:
+{
+  @expand(R_Metal_ShaderTable a) `str8_lit_comp("r_metal_$(a.name_lower)_vertex")`;
+}
+
+@c_file @data(String8)
+r_metal_shader_kind_ffunc_name_table:
+{
+  @expand(R_Metal_ShaderTable a) `str8_lit_comp("r_metal_$(a.name_lower)_fragment")`;
+}
+
+@c_file @data(MTLPixelFormat)
+r_metal_shader_kind_color_format_table:
+{
+  @expand(R_Metal_ShaderTable a) `$(a.color_format)`;
+}
+
+@c_file @data(MTLPixelFormat)
+r_metal_shader_kind_depth_format_table:
+{
+  @expand(R_Metal_ShaderTable a) `$(a.depth_format)`;
+}

@@ -5909,16 +5909,11 @@ rd_window_frame(void)
       cfg_node_release(rd_state->cfg, cfg_node_child_from_string(window, str8_lit("maximized")));
     }
     
-    //- rjf: DPI changes -> xform font size / window size
+    //- rjf: DPI changes -> drop rasterized glyphs, which are sized in pixels
     F32 dpi = wm_dpi_from_window(ws->os);
     if(dpi != ws->last_dpi)
     {
       fnt_reset();
-      F32 current_font_size = rd_font_size();
-      F32 new_font_size = current_font_size * (dpi / ws->last_dpi);
-      new_font_size = Clamp(6.f, new_font_size, 72.f);
-      CFG_Node *font_size_cfg = cfg_node_child_from_string_or_alloc(rd_state->cfg, window, str8_lit("font_size"));
-      cfg_node_new_replacef(rd_state->cfg, font_size_cfg, "%I64u", (U64)new_font_size);
       ws->last_dpi = dpi;
     }
     
@@ -7410,7 +7405,14 @@ rd_window_frame(void)
       {
         UI_Key menu_bar_group_key = ui_key_from_string(ui_key_zero(), str8_lit("###top_bar_group"));
         MemoryZeroArray(ui_top_parent()->parent->corner_radii);
-        
+
+        //- space for window buttons which the window manager draws itself
+        F32 title_bar_left_pad = wm_custom_title_bar_left_pad_from_window(ws->os);
+        if(title_bar_left_pad != 0)
+        {
+          ui_spacer(ui_px(title_bar_left_pad, 1.f));
+        }
+
         //- rjf: left column
         {
           ui_set_next_flags(UI_BoxFlag_Clip|UI_BoxFlag_ViewScrollX|UI_BoxFlag_ViewClamp);
@@ -7961,8 +7963,9 @@ rd_window_frame(void)
             }
           }
           
-          // rjf: min/max/close buttons
-          UI_TagF("implicit")
+          // rjf: min/max/close buttons, unless the window manager draws its own
+          if(title_bar_left_pad == 0)
+            UI_TagF("implicit")
             UI_TagF("weak")
             UI_VisualMargin(ui_top_font_size()*0.5f)
             UI_CornerRadius(ui_top_font_size()*0.9f)
@@ -10432,6 +10435,11 @@ rd_font_size(void)
 {
   F32 size = rd_setting_f32_from_name(str8_lit("font_size"));
   size = Clamp(6.f, size, 72.f);
+
+  // the setting is in 96 dpi pixels. every size in the ui derives from this
+  // one, so this is where the window's dpi comes in.
+  RD_WindowState *ws = rd_window_state_from_cfg(cfg_node_from_id(rd_regs()->window));
+  size *= wm_dpi_from_window(ws->os) / 96.f;
   return size;
 }
 
@@ -12182,11 +12190,13 @@ rd_frame(void)
         rd_state->drag_drop_state = RD_DragDropState_Dropping;
       }
       
-      //- rjf: try window close
+      //- rjf: try window close. a close that names a window closes that window,
+      // which is an exit when it is the last one. a close that names none is a
+      // request to quit.
       if(!take && event->kind == WM_EventKind_WindowClose && ws != 0)
       {
         take = 1;
-        rd_cmd(RD_CmdKind_Exit);
+        rd_cmd(ws != &rd_nil_window_state ? RD_CmdKind_CloseWindow : RD_CmdKind_Exit);
       }
       
       //- rjf: try menu bar operations
@@ -12247,6 +12257,13 @@ rd_frame(void)
             }
             rd_cmd(RD_CmdKind_RunCommand, .cmd_name = cmd_name);
             wm_text(&events, event->window, hit_char);
+
+            // a chord with alt held is also a character where alt is how
+            // characters are typed. this one ran a command, so it types none.
+            if(event->modifiers & WM_Modifier_Alt && event->next != 0 && event->next->kind == WM_EventKind_Text)
+            {
+              wm_eat_event(&events, event->next);
+            }
             next = event->next;
             take = 1;
             if(event->modifiers & WM_Modifier_Alt)
@@ -14416,7 +14433,7 @@ rd_frame(void)
           if(cfg != &cfg_nil_node)
           {
             fnt_reset();
-            F32 current_font_size = rd_font_size();
+            F32 current_font_size = rd_setting_f32_from_name(str8_lit("font_size"));
             F32 new_font_size = current_font_size+1;
             new_font_size = Clamp(6.f, new_font_size, 72.f);
             CFG_Node *font_size_cfg = cfg_node_child_from_string_or_alloc(rd_state->cfg, cfg, str8_lit("font_size"));
@@ -14428,7 +14445,7 @@ rd_frame(void)
           if(cfg != &cfg_nil_node)
           {
             fnt_reset();
-            F32 current_font_size = rd_font_size();
+            F32 current_font_size = rd_setting_f32_from_name(str8_lit("font_size"));
             F32 new_font_size = current_font_size-1;
             new_font_size = Clamp(6.f, new_font_size, 72.f);
             CFG_Node *font_size_cfg = cfg_node_child_from_string_or_alloc(rd_state->cfg, cfg, str8_lit("font_size"));

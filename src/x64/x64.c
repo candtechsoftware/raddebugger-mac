@@ -19,12 +19,17 @@ x64_cpuid(U32 leaf, U32 *eax, U32 *ebx, U32 *ecx, U32 *edx)
   if (ebx) { *ebx = info[1]; }
   if (ecx) { *ecx = info[2]; }
   if (edx) { *edx = info[3]; }
-#elif COMPILER_CLANG || COMPILER_GCC
+#elif (COMPILER_CLANG || COMPILER_GCC) && (ARCH_X64 || ARCH_X86)
   if (!eax) { eax = &info[0]; }
   if (!ebx) { ebx = &info[1]; }
   if (!ecx) { ecx = &info[2]; }
   if (!edx) { edx = &info[3]; }
   __get_cpuid(leaf, eax, ebx, ecx, edx);
+#elif COMPILER_CLANG || COMPILER_GCC
+  if (eax) { *eax = 0; }
+  if (ebx) { *ebx = 0; }
+  if (ecx) { *ecx = 0; }
+  if (edx) { *edx = 0; }
 #else
 # error "cpuid is not defined for this compiler"
 #endif
@@ -40,12 +45,17 @@ x64_cpuid_ex(U32 leaf, U32 sub_leaf, U32 *eax, U32 *ebx, U32 *ecx, U32 *edx)
   if (ebx) { *ebx = info[1]; }
   if (ecx) { *ecx = info[2]; }
   if (edx) { *edx = info[3]; }
-#elif COMPILER_CLANG || COMPILER_GCC
+#elif (COMPILER_CLANG || COMPILER_GCC) && (ARCH_X64 || ARCH_X86)
   if (!eax) { eax = &info[0]; }
   if (!ebx) { ebx = &info[1]; }
   if (!ecx) { ecx = &info[2]; }
   if (!edx) { edx = &info[3]; }
   __get_cpuid_count(leaf, sub_leaf, eax, ebx, ecx, edx);
+#elif COMPILER_CLANG || COMPILER_GCC
+  if (eax) { *eax = 0; }
+  if (ebx) { *ebx = 0; }
+  if (ecx) { *ecx = 0; }
+  if (edx) { *edx = 0; }
 #else
 # error "cpuid_count is not defined for this compiler"
 #endif

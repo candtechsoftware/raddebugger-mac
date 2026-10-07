@@ -1003,6 +1003,12 @@ wm_window_push_custom_title_bar_client_area(WM_Window handle, Rng2F32 rect)
   SLLQueuePush(w->first_client_area, w->last_client_area, n);
 }
 
+internal F32
+wm_custom_title_bar_left_pad_from_window(WM_Window handle)
+{
+  return 0;
+}
+
 internal Rng2F32
 wm_rect_from_window(WM_Window handle)
 {
