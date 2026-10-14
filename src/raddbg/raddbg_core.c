@@ -711,7 +711,7 @@ rd_ctrl_entity_from_eval_space(E_Space space)
      space.kind == RD_EvalSpaceKind_MetaUnattachedProcess)
   {
     D_Handle handle;
-    handle.demon_id      = (U32)((space.u64s[0] & 0xffffffff00000000ull) >> 32);
+    handle.server_id      = (U32)((space.u64s[0] & 0xffffffff00000000ull) >> 32);
     handle.controller_kind = (U32)((space.u64s[0] & 0x00000000ffffffffull) >> 0);
     handle.entity_id       = space.u64s[1];
     entity = d_entity_from_handle(handle);
@@ -726,7 +726,7 @@ rd_eval_space_from_ctrl_entity(D_Entity *entity, E_SpaceKind kind)
   if(entity != &d_entity_nil)
   {
     space = e_space_make(kind);
-    space.u64s[0] = (((U64)entity->handle.demon_id) << 32) | (((U64)entity->handle.controller_kind) << 0);
+    space.u64s[0] = (((U64)entity->handle.server_id) << 32) | (((U64)entity->handle.controller_kind) << 0);
     space.u64s[1] = entity->handle.entity_id;
   }
   return space;
@@ -2496,7 +2496,7 @@ rd_view_ui(Rng2F32 rect)
                         else if(entity->kind == D_EntityKind_Thread)  { rd_regs()->thread = entity->handle; }
                         else if(entity->kind == D_EntityKind_Module)  { rd_regs()->module = entity->handle; }
                         else if(entity->kind == D_EntityKind_Process) { rd_regs()->process = entity->handle; }
-                        else if(entity->kind == D_EntityKind_Machine) { rd_regs()->machine = entity->handle; }
+                        else if(entity->kind == D_EntityKind_Server)  { rd_regs()->server = entity->handle; }
                         rd_cmd(RD_CmdKind_CompleteQuery);
                       }
                     }break;
@@ -2828,7 +2828,7 @@ rd_view_ui(Rng2F32 rect)
                       CFG_Node *locked = cfg_node_child_from_string_or_alloc(rd_state->cfg, cfg, s("locked"));
                       cfg_node_release_all_children(rd_state->cfg, locked);
                       CFG_Node *mid = cfg_node_new(rd_state->cfg, locked, s("mid"));
-                      cfg_node_newf(rd_state->cfg, mid, "%I64u", entity->handle.demon_id);
+                      cfg_node_newf(rd_state->cfg, mid, "%I64u", entity->handle.server_id);
                       CFG_Node *pid = cfg_node_new(rd_state->cfg, locked, s("pid"));
                       cfg_node_newf(rd_state->cfg, pid, "%I64u", entity->id);
                       CFG_Node *addr = cfg_node_new(rd_state->cfg, locked, s("addr"));
@@ -4631,7 +4631,7 @@ rd_view_ui(Rng2F32 rect)
                                 CFG_Node *locked = cfg_node_child_from_string_or_alloc(rd_state->cfg, cfg, s("locked"));
                                 cfg_node_release_all_children(rd_state->cfg, locked);
                                 CFG_Node *mid = cfg_node_new(rd_state->cfg, locked, s("mid"));
-                                cfg_node_newf(rd_state->cfg, mid, "%I64u", entity->handle.demon_id);
+                                cfg_node_newf(rd_state->cfg, mid, "%I64u", entity->handle.server_id);
                                 CFG_Node *pid = cfg_node_new(rd_state->cfg, locked, s("pid"));
                                 cfg_node_newf(rd_state->cfg, pid, "%I64u", entity->id);
                                 CFG_Node *addr = cfg_node_new(rd_state->cfg, locked, s("addr"));
@@ -4728,7 +4728,7 @@ rd_view_ui(Rng2F32 rect)
                             RD_RegsScope(.ctrl_entity = cell_info.entity->handle) switch(cell_info.entity->kind)
                             {
                               default:{rd_drag_begin(RD_RegSlot_CtrlEntity);}break;
-                              case D_EntityKind_Machine:{RD_RegsScope(.machine = cell_info.entity->handle) rd_drag_begin(RD_RegSlot_Machine);}break;
+                              case D_EntityKind_Server:{RD_RegsScope(.server = cell_info.entity->handle) rd_drag_begin(RD_RegSlot_Server);}break;
                               case D_EntityKind_Process:{RD_RegsScope(.process = cell_info.entity->handle) rd_drag_begin(RD_RegSlot_Process);}break;
                               case D_EntityKind_Module:{RD_RegsScope(.module = cell_info.entity->handle) rd_drag_begin(RD_RegSlot_Module);}break;
                               case D_EntityKind_Thread:{RD_RegsScope(.thread = cell_info.entity->handle) rd_drag_begin(RD_RegSlot_Thread);}break;
@@ -5509,7 +5509,7 @@ rd_push_window_title(Arena *arena)
     prof_path = str8_chop_last_dot(prof_path);
     project_name = str8_skip_last_slash(prof_path);
   }
-  String8 result = push_str8f(arena, "%S%s%s", project_name, project_name.size != 0 ? " - " : "", BUILD_TITLE " (" BUILD_VERSION_STRING_LITERAL " " BUILD_RELEASE_PHASE_STRING_LITERAL ")");
+  String8 result = str8f(arena, "%S%s%s", project_name, project_name.size != 0 ? " - " : "", BUILD_TITLE " (" BUILD_VERSION_STRING_LITERAL " " BUILD_RELEASE_PHASE_STRING_LITERAL ")");
   return result;
 }
 
@@ -5519,7 +5519,7 @@ rd_window_from_cfg(CFG_Node *cfg)
   CFG_Node *result = &cfg_nil_node;
   for(CFG_Node *c = cfg; c != &cfg_nil_node; c = c->parent)
   {
-    if(c->parent->parent == cfg_node_root() && str8_match(c->string, str8_lit("window"), 0))
+    if(c->parent->parent == cfg_node_root() && str8_match(c->string, s("window"), 0))
     {
       result = c;
       break;
@@ -5559,9 +5559,45 @@ rd_window_state_from_cfg(CFG_Node *cfg)
   }
   
   //- rjf: allocate/open new window if one was not found
+  B32 need_wm_state = !rd_state->hidden_mode;
   if(window_cfg != &cfg_nil_node && ws == &rd_nil_window_state)
   {
+    // rjf: allocate window
+    ws = rd_state->free_window_state;
+    if(ws != 0)
+    {
+      SLLStackPop_N(rd_state->free_window_state, order_next);
+    }
+    else
+    {
+      ws = push_array_no_zero(rd_state->arena, RD_WindowState, 1);
+    }
+    MemoryZeroStruct(ws);
+    
+    // rjf: fill out window
+    ws->cfg_id = id;
+    ws->arena = arena_alloc();
+    ws->ui = ui_state_alloc();
+    ws->drop_completion_arena = arena_alloc();
+    ws->query_arena = arena_alloc();
+    ws->hover_eval_arena = arena_alloc();
+    ws->autocomp_arena = arena_alloc();
+    
+    // rjf: hook up window links
+    U64 hash = d_hash_from_string(str8_struct(&id));
+    U64 slot_idx = hash%rd_state->window_state_slots_count;
+    RD_WindowStateSlot *slot = &rd_state->window_state_slots[slot_idx];
+    DLLPushBack_NPZ(&rd_nil_window_state, rd_state->first_window_state, rd_state->last_window_state, ws, order_next, order_prev);
+    DLLPushBack_NP(slot->first, slot->last, ws, hash_next, hash_prev);
+  }
+  
+  //- rjf: if we need a real window, and we don't have one -> create
+  if(ws != &rd_nil_window_state && need_wm_state && wm_window_match(ws->os, wm_window_zero()))
+  {
     Temp scratch = scratch_begin(0, 0);
+    
+    // rjf: reset 'frames alive' counter - controls first window show, etc.
+    ws->frames_alive = 0;
     
     // rjf: unpack configuration options
     B32 has_pos = 0;
@@ -5569,10 +5605,10 @@ rd_window_state_from_cfg(CFG_Node *cfg)
     Vec2F32 size = {0};
     WM_Monitor preferred_monitor = {0};
     {
-      CFG_Node *pos_cfg = cfg_node_child_from_string(window_cfg, str8_lit("pos"));
+      CFG_Node *pos_cfg = cfg_node_child_from_string(window_cfg, s("pos"));
       has_pos = (pos_cfg != &cfg_nil_node);
-      CFG_Node *size_cfg = cfg_node_child_from_string(window_cfg, str8_lit("size"));
-      CFG_Node *monitor_cfg = cfg_node_child_from_string(window_cfg, str8_lit("monitor"));
+      CFG_Node *size_cfg = cfg_node_child_from_string(window_cfg, s("size"));
+      CFG_Node *monitor_cfg = cfg_node_child_from_string(window_cfg, s("monitor"));
       pos.x = (F32)f64_from_str8(pos_cfg->first->string);
       pos.y = (F32)f64_from_str8(pos_cfg->first->next->string);
       size.x = (F32)f64_from_str8(size_cfg->first->string);
@@ -5589,54 +5625,35 @@ rd_window_state_from_cfg(CFG_Node *cfg)
       }
     }
     
-    // rjf: allocate window
-    ws = rd_state->free_window_state;
-    if(ws != 0)
-    {
-      SLLStackPop_N(rd_state->free_window_state, order_next);
-    }
-    else
-    {
-      ws = push_array_no_zero(rd_state->arena, RD_WindowState, 1);
-    }
-    MemoryZeroStruct(ws);
-    
-    // rjf: fill out window
-    ws->cfg_id = id;
-    ws->arena = arena_alloc();
-    {
-      String8 title = rd_push_window_title(scratch.arena);
-      ws->os = wm_window_open(r2f32p(pos.x, pos.y, pos.x+size.x, pos.y+size.y), (!has_pos*WM_WindowFlag_UseDefaultPosition)|WM_WindowFlag_CustomBorder, title);
-    }
+    // rjf: create wm window, equip for rendering
+    String8 title = rd_push_window_title(scratch.arena);
+    ws->os = wm_window_open(r2f32p(pos.x, pos.y, pos.x+size.x, pos.y+size.y), (!has_pos*WM_WindowFlag_UseDefaultPosition)|WM_WindowFlag_CustomBorder, title);
     ws->r = r_window_equip(ws->os);
-    ws->ui = ui_state_alloc();
-    ws->drop_completion_arena = arena_alloc();
-    ws->query_arena = arena_alloc();
-    ws->hover_eval_arena = arena_alloc();
-    ws->autocomp_arena = arena_alloc();
     ws->last_dpi = wm_dpi_from_window(ws->os);
     WM_Monitor zero_monitor = {0};
     if(!wm_monitor_match(zero_monitor, preferred_monitor))
     {
       wm_window_set_monitor(ws->os, preferred_monitor);
     }
-    if(cfg_node_child_from_string(window_cfg, str8_lit("fullscreen")) != &cfg_nil_node)
+    if(cfg_node_child_from_string(window_cfg, s("fullscreen")) != &cfg_nil_node)
     {
       wm_window_set_fullscreen(ws->os, 1);
     }
-    if(cfg_node_child_from_string(window_cfg, str8_lit("maximized")) != &cfg_nil_node)
+    if(cfg_node_child_from_string(window_cfg, s("maximized")) != &cfg_nil_node)
     {
       wm_window_set_maximized(ws->os, 1);
     }
     
-    // rjf: hook up window links
-    U64 hash = d_hash_from_string(str8_struct(&id));
-    U64 slot_idx = hash%rd_state->window_state_slots_count;
-    RD_WindowStateSlot *slot = &rd_state->window_state_slots[slot_idx];
-    DLLPushBack_NPZ(&rd_nil_window_state, rd_state->first_window_state, rd_state->last_window_state, ws, order_next, order_prev);
-    DLLPushBack_NP(slot->first, slot->last, ws, hash_next, hash_prev);
-    
     scratch_end(scratch);
+  }
+  
+  //- rjf: if we don't want a real window, but we have one -> destroy
+  else if(ws != &rd_nil_window_state && !need_wm_state && !wm_window_match(ws->os, wm_window_zero()))
+  {
+    r_window_unequip(ws->os, ws->r);
+    wm_window_close(ws->os);
+    MemoryZeroStruct(&ws->os);
+    MemoryZeroStruct(&ws->r);
   }
   
   //- rjf: touch window for this frame
@@ -5682,9 +5699,9 @@ rd_window_frame(void)
   //////////////////////////////
   //- rjf: @window_frame_part unpack context
   //
-  CFG_Node *window          = cfg_node_from_id(rd_regs()->window);
+  CFG_Node *window        = cfg_node_from_id(rd_regs()->window);
   RD_WindowState *ws      = rd_window_state_from_cfg(cfg_node_from_id(rd_regs()->window));
-  CFG_PanelTree panel_tree = cfg_panel_tree_from_cfg(scratch.arena, window);
+  CFG_PanelTree panel_tree= cfg_panel_tree_from_cfg(scratch.arena, window);
   B32 window_is_focused   = (wm_window_is_focused(ws->os) || ws->window_temporarily_focused_ipc);
   B32 popup_is_open       = (rd_state->popup_active);
   B32 query_is_open       = (ws->query_top != 0);
@@ -6136,7 +6153,7 @@ rd_window_frame(void)
         ////////////////////////
         //- rjf: control entity tooltips
         //
-        case RD_RegSlot_Machine:   {ctrl_entity = d_entity_from_handle(regs->machine);     }goto ctrl_entity_tooltip;
+        case RD_RegSlot_Server:    {ctrl_entity = d_entity_from_handle(regs->server);      }goto ctrl_entity_tooltip;
         case RD_RegSlot_Process:   {ctrl_entity = d_entity_from_handle(regs->process);     }goto ctrl_entity_tooltip;
         case RD_RegSlot_Module:    {ctrl_entity = d_entity_from_handle(regs->module);      }goto ctrl_entity_tooltip;
         case RD_RegSlot_Thread:    {ctrl_entity = d_entity_from_handle(regs->thread);      }goto ctrl_entity_tooltip;
@@ -6362,8 +6379,8 @@ rd_window_frame(void)
           ID(panel);
           ID(view);
 #undef ID
-#define Handle(name) ui_labelf("%s: [0x%x, 0x%x, 0x%I64x]", #name, (regs->name).demon_id, (regs->name).controller_kind, (regs->name).entity_id)
-          Handle(machine);
+#define Handle(name) ui_labelf("%s: [0x%x, 0x%x, 0x%I64x]", #name, (regs->name).server_id, (regs->name).controller_kind, (regs->name).entity_id)
+          Handle(server);
           Handle(process);
           Handle(module);
           Handle(thread);
@@ -7905,12 +7922,53 @@ rd_window_frame(void)
             }
           }
           
+          // rjf: remote controller viz
+          {
+            CFG_Node *root = cfg_node_root();
+            CFG_Node *transient = cfg_node_child_from_string(root, s("transient"));
+            CFG_NodePtrList remote_controllers = cfg_node_child_list_from_string(scratch.arena, transient, s("remote_controller"));
+            for EachNode(n, CFG_NodePtrNode, remote_controllers.first)
+            {
+              CFG_Node *rc = n->v;
+              String8 ip_addr = rc->first->string;
+              {
+                ui_set_next_pref_width(ui_children_sum(1));
+                ui_set_next_child_layout_axis(Axis2_X);
+                UI_Box *rc_box = &ui_nil_box;
+                UI_VisualMargin(ui_top_font_size()*0.5f)
+                  UI_CornerRadius(ui_top_font_size()*0.5f)
+                {
+                  rc_box = ui_build_box_from_stringf(UI_BoxFlag_Clickable|
+                                                     UI_BoxFlag_DrawBackground|
+                                                     UI_BoxFlag_DrawHotEffects|
+                                                     UI_BoxFlag_DrawActiveEffects,
+                                                     "###rc_button");
+                }
+                wm_window_push_custom_title_bar_client_area(ws->os, rc_box->rect);
+                UI_Parent(rc_box)
+                  UI_PrefWidth(ui_text_dim(10, 0))
+                  UI_TextAlignment(UI_TextAlign_Center)
+                  UI_Padding(ui_em(0.5f, 1.f))
+                  RD_Font(RD_FontSlot_Icons)
+                  UI_TagF("pop")
+                {
+                  ui_label(rd_icon_kind_text_table[RD_IconKind_Machine]);
+                }
+                UI_Signal rc_sig = ui_signal_from_box(rc_box);
+                if(ui_hovering(rc_sig)) UI_Tooltip
+                {
+                  ui_label(ip_addr);
+                }
+              }
+            }
+          }
+          
           // rjf: loaded project viz
           if(do_user_prof)
           {
             CFG_Node *root = cfg_node_root();
-            CFG_Node *project = cfg_node_child_from_string(root, str8_lit("project"));
-            CFG_Node *name = cfg_node_child_from_string(project, str8_lit("name"));
+            CFG_Node *project = cfg_node_child_from_string(root, s("project"));
+            CFG_Node *name = cfg_node_child_from_string(project, s("name"));
             String8 project_name = name->first->string;
             if(project_name.size == 0)
             {
@@ -11045,7 +11103,7 @@ rd_regs_fill_slot_from_string(RD_RegSlot slot, String8 query_expr, String8 strin
     }break;
     
     //- rjf: ctrl entities
-    case RD_RegSlot_Machine:
+    case RD_RegSlot_Server:
     case RD_RegSlot_Module:
     case RD_RegSlot_Process:
     case RD_RegSlot_Thread:
@@ -11278,9 +11336,10 @@ rd_init(CmdLine *cmdln)
   Arena *arena = arena_alloc();
   rd_state = push_array(arena, RD_State, 1);
   rd_state->arena = arena;
-  rd_state->quit_after_success = (cmd_line_has_flag(cmdln, str8_lit("quit_after_success")) ||
-                                  cmd_line_has_flag(cmdln, str8_lit("q")));
+  rd_state->quit_after_success = (cmd_line_has_flag(cmdln, s("quit_after_success")) ||
+                                  cmd_line_has_flag(cmdln, s("q")));
   rd_state->override_focus_on_stop = (cmd_line_has_flag(cmdln, s("no_focus_on_stop")));
+  rd_state->hidden_mode = cmd_line_has_flag(cmdln, s("hide_ui"));
   rd_state->user_path_arena = arena_alloc();
   rd_state->project_path_arena = arena_alloc();
   rd_state->theme_path_arena = arena_alloc();
@@ -11449,7 +11508,7 @@ rd_init(CmdLine *cmdln)
         {
           after_first_non_flag = 1;
         }
-        if(after_first_non_flag && !is_cfg && !is_dmp)
+        if(after_first_non_flag && !is_cfg && !is_dmp && (!is_flag || target_args.node_count != 0))
         {
           str8_list_push(scratch2.arena, &target_args, arg);
         }
@@ -12816,7 +12875,7 @@ rd_frame(void)
       //- rjf: add macros for evallable control entities
       String8 evallable_ctrl_names[] =
       {
-        str8_lit("machine"),
+        str8_lit("server"),
         str8_lit("process"),
         str8_lit("thread"),
         str8_lit("module"),
@@ -12839,9 +12898,9 @@ rd_frame(void)
           {
             e_string2expr_map_insert(scratch.arena, macro_map, entity->string, expr);
           }
-          if(kind == D_EntityKind_Machine && entity->handle.demon_id == D_DemonID_LocalHost)
+          if(kind == D_EntityKind_Server && entity->handle.server_id == D_ServerID_LocalHost)
           {
-            e_string2expr_map_insert(scratch.arena, macro_map, str8_lit("local_machine"), expr);
+            e_string2expr_map_insert(scratch.arena, macro_map, str8_lit("local_server"), expr);
           }
           if(kind == D_EntityKind_Thread && d_handle_match(rd_base_regs()->thread, entity->handle))
           {
@@ -13599,7 +13658,7 @@ rd_frame(void)
             if(D_CmdKind_Null < (D_CmdKind)kind && (D_CmdKind)kind < D_CmdKind_COUNT)
             {
               D_CmdParams params = {0};
-              params.machine       = rd_regs()->machine;
+              params.server        = rd_regs()->server;
               params.process       = rd_regs()->process;
               params.thread        = rd_regs()->thread;
               params.entity        = rd_regs()->ctrl_entity;
@@ -13663,7 +13722,7 @@ rd_frame(void)
               str8_list_pushf(scratch.arena, &exprs, "query:targets");
               str8_list_pushf(scratch.arena, &exprs, "query:breakpoints");
               str8_list_pushf(scratch.arena, &exprs, "query:recent_projects");
-              str8_list_pushf(scratch.arena, &exprs, "query:machines");
+              str8_list_pushf(scratch.arena, &exprs, "query:servers");
               str8_list_pushf(scratch.arena, &exprs, "query:processes");
               str8_list_pushf(scratch.arena, &exprs, "query:threads");
               str8_list_pushf(scratch.arena, &exprs, "query:modules");
@@ -13951,6 +14010,8 @@ rd_frame(void)
             }
             str8_list_pushf(rd_state->cmd_output_arena, &rd_state->cmd_outputs, "}\n");
           }break;
+          case RD_CmdKind_HideUI:{rd_state->hidden_mode = 1;}break;
+          case RD_CmdKind_ShowUI:{rd_state->hidden_mode = 0;}break;
           
           //- rjf: exiting
           case RD_CmdKind_Exit:
@@ -17324,13 +17385,13 @@ rd_frame(void)
             D_Entity *thread = d_entity_from_handle(rd_regs()->thread);
             D_Entity *process = d_entity_ancestor_from_kind(thread, D_EntityKind_Process);
             D_Entity *module = d_module_from_process_vaddr(process, d_cached_ip_from_thread(thread->handle));
-            D_Entity *machine = d_entity_ancestor_from_kind(process, D_EntityKind_Machine);
+            D_Entity *server = d_entity_ancestor_from_kind(process, D_EntityKind_Server);
             rd_state->base_regs.v.unwind_count = 0;
             rd_state->base_regs.v.inline_depth = 0;
             rd_state->base_regs.v.thread  = thread->handle;
             rd_state->base_regs.v.module  = module->handle;
             rd_state->base_regs.v.process = process->handle;
-            rd_state->base_regs.v.machine = machine->handle;
+            rd_state->base_regs.v.server  = server->handle;
             rd_cmd(RD_CmdKind_FindThread, .thread = thread->handle, .unwind_count = 0, .inline_depth = 0);
           }break;
           case RD_CmdKind_SelectUnwind:
@@ -18340,6 +18401,24 @@ rd_frame(void)
           MTX_Op op = {r1u64(max_U64, max_U64), evt->string};
           mtx_push_op(key, op);
         }break;
+        case D_EventKind_RemoteControllerConnect:
+        {
+          CFG_Node *transient = cfg_node_child_from_string(cfg_node_root(), s("transient"));
+          CFG_Node *ctrlr = cfg_node_new(rd_state->cfg, transient, s("remote_controller"));
+          cfg_node_new(rd_state->cfg, ctrlr, sock_string_from_endpoint(scratch.arena, rd_state->ipc_sock_endpoint));
+        }break;
+        case D_EventKind_RemoteControllerDisconnect:
+        {
+          CFG_Node *transient = cfg_node_child_from_string(cfg_node_root(), s("transient"));
+          for(CFG_Node *child = transient; child != &cfg_nil_node; child = child->next)
+          {
+            if(str8_match(child->string, s("remote_controller"), 0) && str8_match(child->first->string, rd_regs()->string, 0))
+            {
+              cfg_node_release(rd_state->cfg, child);
+              break;
+            }
+          }
+        }break;
       }
     }
     
@@ -18558,9 +18637,19 @@ rd_frame(void)
   //////////////////////////////
   //- rjf: update/render all windows
   //
+  if(rd_state->hidden_mode)
+  {
+    CFG_NodePtrList windows = cfg_node_top_level_list_from_string(scratch.arena, s("window"));
+    for(CFG_NodePtrNode *n = windows.first; n != 0; n = n->next)
+    {
+      CFG_Node *window = n->v;
+      rd_window_state_from_cfg(window);
+    }
+  }
+  else
   {
     dr_begin_frame(rd_font_from_slot(RD_FontSlot_Icons));
-    CFG_NodePtrList windows = cfg_node_top_level_list_from_string(scratch.arena, str8_lit("window"));
+    CFG_NodePtrList windows = cfg_node_top_level_list_from_string(scratch.arena, s("window"));
     for(CFG_NodePtrNode *n = windows.first; n != 0; n = n->next)
     {
       CFG_Node *window = n->v;
@@ -18667,7 +18756,7 @@ rd_frame(void)
   //////////////////////////////
   //- rjf: submit rendering to all windows
   //
-  ProfScope("submit rendering to all windows")
+  ProfScope("submit rendering to all windows") if(!rd_state->hidden_mode)
   {
     r_begin_frame();
     for(RD_WindowState *w = rd_state->first_window_state; w != &rd_nil_window_state; w = w->order_next)

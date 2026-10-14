@@ -421,6 +421,7 @@ struct RD_State
   B32 override_focus_on_stop;
   S32 frame_depth;
   U64 frame_eval_memread_endt_us;
+  SOCK_Endpoint ipc_sock_endpoint;
   
   // rjf: installation setting state
   B32 installed;
@@ -432,6 +433,9 @@ struct RD_State
   Arena *update_check_arena;
   String8List update_check_response_body_pieces;
   GuardedRing *update_check_http_ring;
+  
+  // rjf: hidden mode
+  B32 hidden_mode;
   
   // rjf: config bucket paths
   Arena *user_path_arena;

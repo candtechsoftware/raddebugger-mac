@@ -2,6 +2,13 @@
 // Licensed under the MIT license (https://opensource.org/license/mit/)
 
 ////////////////////////////////
+//~ rjf: remote TODO notes
+//
+// [ ] ui -> ui?
+// [ ] ui (w/ debug info) -> ui (w/out debug info)?
+// [ ] ctrl -> slim server?
+
+////////////////////////////////
 //~ rjf: linux TODO notes
 //
 // post initial alpha:
@@ -456,6 +463,7 @@
 #include "disasm/disasm_inc.h"
 #include "stap/stap_parse.h"
 #include "demon/demon_inc.h"
+#include "dbg_server/dbg_server.h"
 #include "eval/eval_inc.h"
 #include "eval2/eval2.h"
 #include "dbg_engine/dbg_engine_inc.h"
@@ -519,6 +527,7 @@
 #include "disasm/disasm_inc.c"
 #include "stap/stap_parse.c"
 #include "demon/demon_inc.c"
+#include "dbg_server/dbg_server.c"
 #include "eval/eval_inc.c"
 #include "eval2/eval2.c"
 #include "dbg_engine/dbg_engine_inc.c"
@@ -683,8 +692,8 @@ entry_point(CmdLine *cmd_line)
         d_set_wakeup_hook(wakeup_hook_ctrl);
       }
       
-      //- rjf: set up socket session for ICP
-      SOCK_Session icp_sock_session = sock_session_open((U16)ipc_port, wakeup_hook_ctrl);
+      //- rjf: set up socket session for IPC
+      SOCK_Session ipc_sock_session = sock_session_open((U16)ipc_port, wakeup_hook_ctrl);
       
       //- rjf: main application loop
       {
@@ -697,7 +706,7 @@ entry_point(CmdLine *cmd_line)
           {
             Temp scratch = scratch_begin(0, 0);
             String8 packet = {0};
-            if(sock_recv(scratch.arena, icp_sock_session, &ipc_protocol, &ipc_endpoint, &packet, 0))
+            if(sock_recv(scratch.arena, ipc_sock_session, &ipc_protocol, &ipc_endpoint, &packet, 0))
             {
               // rjf: use header to determine message portion
               String8 msg = {0};
@@ -754,6 +763,7 @@ entry_point(CmdLine *cmd_line)
                   }
                   rd_request_frame();
                   ipc_command_frame = 1;
+                  rd_state->ipc_sock_endpoint = ipc_endpoint;
                 }
               }
             }
@@ -791,7 +801,7 @@ entry_point(CmdLine *cmd_line)
             str8_list_push_front(scratch.arena, &rd_state->cmd_outputs, str8_struct(&packet_size));
             str8_list_push_front(scratch.arena, &rd_state->cmd_outputs, str8_struct(&ipc_packet_magic_start));
             String8 msg = str8_list_join(scratch.arena, &rd_state->cmd_outputs, 0);
-            sock_send(icp_sock_session, ipc_protocol, ipc_endpoint, msg, now_time_us()+5000000);
+            sock_send(ipc_sock_session, ipc_protocol, ipc_endpoint, msg, now_time_us()+5000000);
           }
         }
       }
@@ -833,7 +843,7 @@ entry_point(CmdLine *cmd_line)
         }
         StringJoin join = {.sep = s(" ")};
         String8 text = str8_list_join(scratch.arena, &text_parts, &join);
-        U64 msg_size = text_parts.total_size;
+        U64 msg_size = text.size;
         str8_list_push(scratch.arena, &parts, str8_struct(&ipc_packet_magic_start));
         str8_list_push(scratch.arena, &parts, str8_struct(&msg_size));
         str8_list_push(scratch.arena, &parts, text);
@@ -884,25 +894,25 @@ entry_point(CmdLine *cmd_line)
     case ExecMode_Help:
     {
       sh_message(0,
-                 str8_lit("The RAD Debugger - Help"),
-                 str8_lit("The following options may be used when starting the RAD Debugger from the command line:\n\n"
-                          "--user:<path>\n"
-                          "Use to specify the location of a user file which should be used. User files are used to store settings for users, including window and panel setups, path mapping, and visual settings. If this file does not exist, it will be created as necessary. This file will be autosaved as user-related changes are made.\n\n"
-                          "--project:<path>\n"
-                          "Use to specify the location of a project file which should be used. Project files are used to store settings for users and projects. If this file does not exist, it will be created as necessary. This file will be autosaved as project-related changes are made.\n\n"
-                          "--auto_step\n"
-                          "This will step into all active targets after the debugger initially starts.\n\n"
-                          "--auto_run\n"
-                          "This will run all active targets after the debugger initially starts.\n\n"
-                          "--quit_after_success (or -q)\n"
-                          "This will close the debugger automatically after all processes exit, if they all exited successfully (with code 0), and ran with no interruptions.\n\n"
-                          "--ipc <command>\n"
-                          "This will launch the debugger in the non-graphical IPC mode, which is used to communicate with another running instance of the debugger. The debugger instance will launch, send the specified command, then immediately terminate. This may be used by editors or other programs to control the debugger.\n\n"
-                          "--gen_crash_dump\n"
-                          "Generate mini dump on crash.\n\n"
-                          "--logs:<path>\n"
-                          "Overrides default path to the folder with logs.\n"
-                          ));
+                 s("The RAD Debugger - Help"),
+                 s("The following options may be used when starting the RAD Debugger from the command line:\n\n"
+                   "--user:<path>\n"
+                   "Use to specify the location of a user file which should be used. User files are used to store settings for users, including window and panel setups, path mapping, and visual settings. If this file does not exist, it will be created as necessary. This file will be autosaved as user-related changes are made.\n\n"
+                   "--project:<path>\n"
+                   "Use to specify the location of a project file which should be used. Project files are used to store settings for users and projects. If this file does not exist, it will be created as necessary. This file will be autosaved as project-related changes are made.\n\n"
+                   "--auto_step\n"
+                   "This will step into all active targets after the debugger initially starts.\n\n"
+                   "--auto_run\n"
+                   "This will run all active targets after the debugger initially starts.\n\n"
+                   "--quit_after_success (or -q)\n"
+                   "This will close the debugger automatically after all processes exit, if they all exited successfully (with code 0), and ran with no interruptions.\n\n"
+                   "--ipc <command>\n"
+                   "This will launch the debugger in the non-graphical IPC mode, which is used to communicate with another running instance of the debugger. The debugger instance will launch, send the specified command, then immediately terminate. This may be used by editors or other programs to control the debugger.\n\n"
+                   "--gen_crash_dump\n"
+                   "Generate mini dump on crash.\n\n"
+                   "--logs:<path>\n"
+                   "Overrides default path to the folder with logs.\n"
+                   ));
     }break;
   }
   

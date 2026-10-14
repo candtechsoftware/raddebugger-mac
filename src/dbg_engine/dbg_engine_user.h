@@ -59,7 +59,7 @@ D_RunKind;
 typedef struct D_CmdParams D_CmdParams;
 struct D_CmdParams
 {
-  D_Handle machine;
+  D_Handle server;
   D_Handle process;
   D_Handle thread;
   D_Handle entity;
@@ -160,6 +160,8 @@ struct D_RunLocalsCache
 typedef enum D_MsgKind
 {
   D_MsgKind_Null,
+  D_MsgKind_OpenRemoteServer,
+  D_MsgKind_CloseRemoteServer,
   D_MsgKind_Launch,
   D_MsgKind_Attach,
   D_MsgKind_OpenCrashDump,
@@ -262,6 +264,14 @@ typedef enum D_EventKind
   D_EventKind_MemCommit,
   D_EventKind_MemDecommit,
   D_EventKind_MemRelease,
+  
+  //- rjf: remote server connections
+  D_EventKind_ServerConnect,
+  D_EventKind_ServerDisconnect,
+  
+  //- rjf: remote controllers
+  D_EventKind_RemoteControllerConnect,
+  D_EventKind_RemoteControllerDisconnect,
   
   D_EventKind_COUNT
 }
